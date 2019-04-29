@@ -39,28 +39,21 @@ class Command:
         for command_plugin in plugin_list:
             command_plugin.setup(self, plugin)
 
-    def parse_command(self, string, user=None):
-        prefix_char = self.plugin.get_settings().get(["prefix"])
+    def parse_command(self, string):
         parts = re.split('\s+', string)
 
         prefix_len = len(self.plugin.get_settings().get(["prefix"]))
-        if parts[0][0] == prefix_char or user == "Dummy":
-            command_string = parts[0][prefix_len:]
-            command = self.command_dict.get(command_string)
-            if command is None:
-                if parts[0][0] == self.plugin.get_settings().get(["prefix"]) or \
-                        parts[0].lower() == "help":
-                    return self.help()
-                return None, None
+        command = self.command_dict.get(parts[0][prefix_len:])
+        if command is None:
+            if parts[0][0] == self.plugin.get_settings().get(["prefix"]) or \
+                    parts[0].lower() == "help":
+                return self.help()
+            return None, None
 
-            if user and not self.check_perms(command_string, user):
-                return None, error_embed(author=self.plugin.get_printer_name(),
-                                         title="Permission Denied")
-
-            if command.get('params'):
-                return command['cmd'](parts)
-            else:
-                return command['cmd']()
+        if command.get('params'):
+            return command['cmd'](parts)
+        else:
+            return command['cmd']()
 
     def timelapse(self):
 
