@@ -132,6 +132,13 @@ class DiscordRemotePlugin(octoprint.plugin.EventHandlerPlugin,
                 "message": "Hello hello! If you see this message, it means that the settings are correct!"
             },
         }
+        self.permissions = {
+            '1': {'users': '*', 'commands': ''},
+            '2': {'users': '', 'commands': ''},
+            '3': {'users': '', 'commands': ''},
+            '4': {'users': '', 'commands': ''},
+            '5': {'users': '', 'commands': ''}
+        }
 
     def on_after_startup(self):
         # Use a different log file for DiscordRemote, as it is very noisy.
@@ -153,10 +160,18 @@ class DiscordRemotePlugin(octoprint.plugin.EventHandlerPlugin,
             self.discord = Discord()
         self.discord.configure_discord(self._settings.get(['bottoken'], merged=True),
                                        self._settings.get(['channelid'], merged=True),
-                                       self._settings.get(['allowedusers'], merged=True),
                                        self._logger,
                                        self.command,
                                        self.update_discord_status)
+
+        # Transition settings
+        allowed_users = self._settings.get(['allowedusers'], merged=True)
+        if allowed_users:
+            self._settings.set(["allowedusers"], None, True)
+            self._settings.set(['permissions'], {'1': {'users': allowed_users, 'commands': ''}}, True)
+
+            self.send_message(None, "⚠️⚠️⚠️ Allowed users has been changed to a more granular system. "
+                                    "Check the DiscordRemote settings and check that it is suitable⚠️⚠️⚠️")
 
     # ShutdownPlugin mixin
     def on_shutdown(self):
@@ -169,15 +184,16 @@ class DiscordRemotePlugin(octoprint.plugin.EventHandlerPlugin,
         return {
             'bottoken': "",
             'channelid': "",
-            'allowedusers': "",
             'baseurl': "",
             'prefix': "/",
             'show_local_ip': True,
             'show_external_ip': True,
             'events': self.events,
+            'permissions': self.permissions,
             'allow_scripts': False,
             'script_before': '',
-            'script_after': ''
+            'script_after': '',
+            'allowed_gcode': ''
         }
 
     # Restricts some paths to some roles only
@@ -187,13 +203,14 @@ class DiscordRemotePlugin(octoprint.plugin.EventHandlerPlugin,
         return dict(never=[["events", "test"]],
                     admin=[["bottoken"],
                            ["channelid"],
-                           ["allowedusers"],
+                           ["permissions"],
                            ['baseurl'],
                            ['prefix'],
                            ["show_local_ip"],
                            ["show_external_ip"],
                            ['script_before'],
-                           ['script_after']])
+                           ['script_after'],
+                           ['allowed_gcode']])
 
     # AssetPlugin mixin
     def get_assets(self):
@@ -285,7 +302,6 @@ class DiscordRemotePlugin(octoprint.plugin.EventHandlerPlugin,
 
         self.discord.configure_discord(self._settings.get(['bottoken'], merged=True),
                                        self._settings.get(['channelid'], merged=True),
-                                       self._settings.get(['allowedusers'], merged=True),
                                        self._logger,
                                        self.command,
                                        self.update_discord_status)
@@ -351,7 +367,7 @@ class DiscordRemotePlugin(octoprint.plugin.EventHandlerPlugin,
                 done_config = self._settings.get(["events", "printing_done"], merged=True)
                 # Don't send last message if the "printing_done" event is enabled.
                 if done_config["enabled"]:
-                    return
+                    return False
 
             # Otherwise work out if time since last message has passed.
             try:
@@ -441,14 +457,11 @@ class DiscordRemotePlugin(octoprint.plugin.EventHandlerPlugin,
             self.discord = Discord()
 
         out = self.discord.send(embeds=info_embed(author=self.get_printer_name(),
-                                                  title=message))
+                                                  title=message,
+                                                  snapshot=snapshot))
         if not out:
             self._logger.error("Failed to send message")
             return out
-
-        if snapshot:
-            out = self.discord.send(embeds=info_embed(author=self.get_printer_name(),
-                                                      snapshot=snapshot))
 
         # exec "after" script if any
         self.exec_script(event_id, "after")

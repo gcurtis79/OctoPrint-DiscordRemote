@@ -1,9 +1,9 @@
 import collections
+import json
 import humanfriendly
 import re
 import time
 import requests
-from requests import ConnectionError
 
 from octoprint.printer import InvalidFileLocation, InvalidFileType
 
@@ -34,21 +34,28 @@ class Command:
                                      'description': "Mute notifications"}
         self.command_dict['unmute'] = {'cmd': self.unmute,
                                        'description': "Unmute notifications"}
+        self.command_dict['gcode'] = {'cmd': self.gcode, 'params': 'GCODE lines, seperated by \';\'',
+                                      'description': "Send a set of GCODE commands directly to the printer"}
 
         # Load plugins
         for command_plugin in plugin_list:
             command_plugin.setup(self, plugin)
 
-    def parse_command(self, string):
+    def parse_command(self, string, user=None):
         parts = re.split('\s+', string)
 
         prefix_len = len(self.plugin.get_settings().get(["prefix"]))
-        command = self.command_dict.get(parts[0][prefix_len:])
+        command_string = parts[0][prefix_len:]
+        command = self.command_dict.get(command_string)
         if command is None:
             if parts[0][0] == self.plugin.get_settings().get(["prefix"]) or \
                     parts[0].lower() == "help":
                 return self.help()
             return None, None
+
+        if user and not self.check_perms(command_string, user):
+            return None, error_embed(author=self.plugin.get_printer_name(),
+                                     title="Permission Denied")
 
         if command.get('params'):
             return command['cmd'](parts)
@@ -158,7 +165,7 @@ class Command:
             description = ''
             title = ''
             try:
-                title = details['path'][1:]
+                title = details['path'].lstrip('/')
             except:
                 pass
 
@@ -189,7 +196,7 @@ class Command:
                 pass
 
             try:
-                url = "http://" + baseurl + "/downloads/files/" + details['location'] + "/" + details['path'][1:]
+                url = "http://" + baseurl + "/downloads/files/" + details['location'] + "/" + details['path'].lstrip('/')
                 description += 'Download Path: %s\n' % url
             except:
                 pass
@@ -208,7 +215,7 @@ class Command:
     def find_file(self, file_name):
         flat_filelist = self.get_flat_file_list()
         for file in flat_filelist:
-            if file_name in file.get('path'):
+            if file_name.upper() in file.get('path').upper():
                 return file
         return None
 
@@ -256,15 +263,18 @@ class Command:
                                          description='should be a number')
 
         self.plugin.get_printer().connect(port=port, baudrate=baudrate, profile=None)
-        # Sleep a while before checking if connected
-        time.sleep(10)
-        if not self.plugin.get_printer().is_operational():
-            return None, error_embed(author=self.plugin.get_printer_name(),
-                                     title='Failed to connect',
-                                     description='try: "%sconnect [port] [baudrate]"' % self.plugin.get_settings().get(
-                                         ["prefix"]))
 
-        return None, success_embed('Connected to printer')
+        # Check every second for 30 seconds, to see if it has connected.
+        for i in range(30):
+            time.sleep(1)
+            if self.plugin.get_printer().is_operational():
+                return None, success_embed('Connected to printer')
+
+        return None, error_embed(author=self.plugin.get_printer_name(),
+                                 title='Failed to connect',
+                                 description='try: "%sconnect [port] [baudrate]"' % self.plugin.get_settings().get(
+                                     ["prefix"]))
+
 
     def disconnect(self):
         if not self.plugin.get_printer().is_operational():
@@ -306,7 +316,8 @@ class Command:
                     continue
                 builder.add_field(title='Extruder Temp (%s)' % heater, text=temperatures[heater]['actual'], inline=True)
 
-            builder.add_field(title='Bed Temp', text=temperatures['bed']['actual'], inline=True)
+            if temperatures['bed']['actual']:
+                builder.add_field(title='Bed Temp', text=temperatures['bed']['actual'], inline=True)
 
             printing = self.plugin.get_printer().is_printing()
             builder.add_field(title='Printing', text='Yes' if printing else 'No', inline=True)
@@ -342,11 +353,14 @@ class Command:
         return None, success_embed(author=self.plugin.get_printer_name(),
                                    title='Print resumed', snapshot=snapshot)
 
-    def upload_file(self, filename, url):
-        upload_file = self.plugin.get_file_manager().path_on_disk('local', filename)
+    def upload_file(self, filename, url, user):
+        if user and not self.check_perms('upload', user):
+            return None, error_embed(author=self.plugin.get_printer_name(),
+                                     title="Permission Denied")
+        upload_file_path = self.plugin.get_file_manager().path_on_disk('local', filename)
 
         r = requests.get(url, stream=True)
-        with open(upload_file, 'wb') as f:
+        with open(upload_file_path, 'wb') as f:
             for chunk in r.iter_content(chunk_size=1024):
                 if chunk:  # filter out keep-alive new chunks
                     f.write(chunk)
@@ -363,3 +377,52 @@ class Command:
         self.plugin.unmute()
         return None, success_embed(author=self.plugin.get_printer_name(),
                                    title='Notifications Unmuted')
+
+    @staticmethod
+    def _parse_array(string):
+        if string and isinstance(string, basestring):
+            return re.split("[^a-zA-Z0-9*]+", string)
+        return None
+
+    def check_perms(self, command, user):
+        permissions = self.plugin.get_settings().get(['permissions'], merged=True)
+
+        for rulename in permissions:
+            rule = permissions.get(rulename)
+            users = self._parse_array(rule['users'])
+            commands = self._parse_array(rule['commands'])
+            if users is None or commands is None:
+                continue
+            if ('*' in users or user in users) and \
+               ('*' in commands or command in commands):
+                return True
+        return False
+
+    def gcode(self, params):
+        if not self.plugin.get_printer().is_operational():
+            return None, error_embed(author=self.plugin.get_printer_name(),
+                                     title="Printer not connected",
+                                     description="Connect to printer first.")
+
+        allowed_gcodes = self.plugin.get_settings().get(["allowed_gcode"])
+        allowed_gcodes = re.split('[^0-9a-zA-Z]+', allowed_gcodes.upper())
+        script = "".join(params[1:]).upper()
+        lines = script.split(';')
+        for line in lines:
+            first = line.strip().replace(' ', '').replace('\t', '')
+            first = re.findall('[mMgG][0-9]+', first)
+            if first is None or \
+                    len(first) == 0 or \
+                    first[0] not in allowed_gcodes:
+                return None, error_embed(author=self.plugin.get_printer_name(),
+                                         title="Invalid GCODE",
+                                         description="If you want to use \"%s\", add it to the allowed GCODEs" % line)
+        try:
+            self.plugin.get_printer().commands(lines)
+        except Exception as e:
+            return None, error_embed(author=self.plugin.get_printer_name(),
+                                     title="Failed to execute gcode",
+                                     description="Error: %s" % str(e))
+
+        return None, success_embed(author=self.plugin.get_printer_name(),
+                                   title="Sent script")
